@@ -90,6 +90,7 @@ app.get('/user/:userid/feed', function(req, res) {
 });
 
 var StatusUpdateSchema = require('./schemas/statusupdate.json');
+var CommentSchema = require('./schemas/comment.json');
 var validate = require('express-jsonschema').validate;
 var writeDocument = database.writeDocument;
 var addDocument = database.addDocument;
@@ -293,13 +294,105 @@ app.post('/search', function(req, res) {
     // IDs to actual feed item objects.
     res.send(feedItemIDs.filter((feedItemID) => {
       var feedItem = readDocument('feedItems', feedItemID);
-      return feedItem.contents.contents
-	                 .toLowerCase()
-					 .indexOf(queryText) !== -1;
+      return feedItem.contents.contents.toLowerCase().indexOf(queryText) !== -1;
     }).map(getFeedItemSync));
   } else {
     // 400: Bad Request.
     res.status(400).end();
+  }
+});
+
+/**
+ * Adds a new comment to the database.
+ */
+function postComment(feedItemId, user, contents) {
+  // Get the current UNIX time.
+  var time = new Date().getTime();
+  var feedItem = readDocument('feedItems', feedItemId);
+  // The new status update. The database will assign the ID for us.
+  var newComment = {
+      "author": user,
+      "postDate": time,
+      "contents": contents,
+      "likeCounter": []
+    };
+  feedItem.comments.push(newComment);
+
+  // Update the feed object.
+  writeDocument('feedItems', feedItem);
+
+  return feedItem;
+}
+
+// `POST /feeditem/:feeditemid/commentthread/comment? { userId: user, contents: contents  }`
+app.post('/feeditem/:feeditemid/commentthread/',
+         validate({ body: CommentSchema }), function(req, res) {
+  // If this function runs, `req.body` passed JSON validation!
+  var body = req.body;
+  var fromUser = getUserIdFromToken(req.get('Authorization'));
+  var feedItemId = parseInt(req.params.feeditemid, 10);
+  // Check if requester is authorized to post this status update.
+  // (The requester must be the author of the update.)
+  if (fromUser === body.userId) {
+    postComment(feedItemId, body.userId, body.contents);
+    // When POST creates a new resource, we should tell the client about it
+    // in the 'Location' header and use status code 201.
+    res.status(201);
+    // Send the update!
+    res.send(getFeedItemSync(feedItemId));
+  } else {
+    // 401: Unauthorized.
+    res.status(401).end();
+  }
+});
+
+// Like a comment.
+app.put('/feeditem/:feeditemid/commentthread/:commentIdx/likelist/:userid', function(req, res) {
+  var fromUser = getUserIdFromToken(req.get('Authorization'));
+  // Convert params from string to number.
+  var feedItemId = parseInt(req.params.feeditemid, 10);
+  var userId = parseInt(req.params.userid, 10);
+  // var comment = feedItem.comments[req.params.commentIdx];
+  if (fromUser === userId) {
+    var feedItem = readDocument('feedItems', feedItemId);
+    var comment = feedItem.comments[req.params.commentIdx];
+    // Add to likeCounter if not already present.
+    if (comment.likeCounter.indexOf(userId) === -1) {
+      comment.likeCounter.push(userId);
+      writeDocument('feedItems', feedItem);
+    }
+    comment.author = readDocument('users', comment.author);
+    // Return a resolved version of the likeCounter
+    res.send(comment);
+  } else {
+    // 401: Unauthorized.
+    res.status(401).end();
+  }
+});
+
+// Unlike a comment.
+app.delete('/feeditem/:feeditemid/commentthread/:commentIdx/likelist/:userid', function(req, res) {
+  var fromUser = getUserIdFromToken(req.get('Authorization'));
+  // Convert params from string to number.
+  var feedItemId = parseInt(req.params.feeditemid, 10);
+  var userId = parseInt(req.params.userid, 10);
+  if (fromUser === userId) {
+    var feedItem = readDocument('feedItems', feedItemId);
+    var comment = feedItem.comments[req.params.commentIdx];
+    var likeIndex = comment.likeCounter.indexOf(userId);
+    // Remove from likeCounter if present
+    if (likeIndex !== -1) {
+      comment.likeCounter.splice(likeIndex, 1);
+      writeDocument('feedItems', feedItem);
+    }
+    // Return a resolved version of the likeCounter
+    // Note that this request succeeds even if the
+	// user already unliked the request!
+    comment.author = readDocument('users', comment.author);
+    res.send(comment);
+  } else {
+    // 401: Unauthorized.
+    res.status(401).end();
   }
 });
 
